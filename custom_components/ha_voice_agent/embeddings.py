@@ -195,7 +195,7 @@ class EntityEmbeddingIndex:
                     parts.append(f"in {area_name}")
                 parts.append(f"({domain})")
                 if aliases:
-                    parts.append("aka " + ", ".join(aliases[:2]))
+                    parts.append("aka " + ", ".join(str(a) for a in aliases[:2]))
 
                 descriptions.append(" ".join(parts))
                 entity_ids.append(eid)

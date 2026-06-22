@@ -423,6 +423,12 @@ class HAVoiceAgentEntity(ConversationEntity, conversation.AbstractConversationAg
                 target_domain = domain
                 break
 
+        # Type labels mirror the system prompt template
+        _type_labels: dict[str, str] = {
+            "fan": "Fan", "light": "Light", "climate": "AC", "remote": "TV",
+            "media_player": "Speaker", "switch": "Switch", "cover": "Blind",
+        }
+
         # Collect matching exposed entities
         results: list[str] = []
         for area_id, area_name in matched_areas:
@@ -449,7 +455,11 @@ class HAVoiceAgentEntity(ConversationEntity, conversation.AbstractConversationAg
 
                 attr_keys = DOMAIN_ATTRIBUTES.get(entity_domain, [])
                 attrs = {k: v for k in attr_keys if (v := state.attributes.get(k)) is not None}
-                summary = f"{entry.entity_id} ({state.name}, area: {area_name}) is {state.state}"
+
+                # Use "{area} {type}" as display name — avoids HA auto-generated name duplication
+                type_label = _type_labels.get(entity_domain, entity_domain)
+                display_name = f"{area_name} {type_label}"
+                summary = f"{entry.entity_id} ({display_name}) is {state.state}"
                 if attrs:
                     summary += f" | {attrs}"
                 results.append(summary)

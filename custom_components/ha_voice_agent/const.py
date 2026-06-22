@@ -18,10 +18,10 @@ CONF_LLM_LOG_LEVEL = "llm_log_level"
 # Defaults
 DEFAULT_OLLAMA_URL = "http://10.5.6.50:11434"
 DEFAULT_MODEL = "nemotron-3-nano-ha:latest"
-DEFAULT_MAX_TOKENS = 512
+DEFAULT_MAX_TOKENS = 250
 DEFAULT_TEMPERATURE = 0.1
 DEFAULT_MAX_TOOL_CALLS = 3
-DEFAULT_NUM_CTX = 4096
+DEFAULT_NUM_CTX = 2048
 DEFAULT_EMBED_MODEL = "nomic-embed-text-v2-moe:latest"
 DEFAULT_TOP_K = 15
 DEFAULT_VECTOR_SEARCH = True
@@ -68,7 +68,7 @@ DOMAIN_ATTRIBUTES: dict[str, list[str]] = {
         "hvac_mode",
         "fan_mode",
         "preset_mode",
-        "hvac_modes",
+        # hvac_modes excluded — full enum list is verbose noise in voice context
     ],
     "light": ["brightness", "color_temp_kelvin"],
     "media_player": ["volume_level", "source", "media_title"],

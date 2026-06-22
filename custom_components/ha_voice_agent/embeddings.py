@@ -16,8 +16,12 @@ from homeassistant.helpers import area_registry as ar, entity_registry as er
 
 _LOGGER = logging.getLogger(__name__)
 
-# Rebuild debounce — wait this many seconds after a registry change before rebuilding
-_REBUILD_DEBOUNCE = 5.0
+# Rebuild debounce — wait this many seconds after the LAST relevant registry change
+_REBUILD_DEBOUNCE = 30.0
+
+# Fields in an entity-registry update that actually affect our index
+# (area assignment, name, aliases, exposure). All other "update" payloads are ignored.
+_RELEVANT_ENTITY_CHANGES = frozenset({"area_id", "name", "aliases", "hidden_by", "entity_id", "options"})
 
 
 def _cosine_sim(a: list[float], b: list[float]) -> float:
@@ -85,12 +89,12 @@ class EntityEmbeddingIndex:
         await self._build(entities)
         self._unsub.append(
             self.hass.bus.async_listen(
-                er.EVENT_ENTITY_REGISTRY_UPDATED, self._on_registry_change
+                er.EVENT_ENTITY_REGISTRY_UPDATED, self._on_entity_registry_change
             )
         )
         self._unsub.append(
             self.hass.bus.async_listen(
-                ar.EVENT_AREA_REGISTRY_UPDATED, self._on_registry_change
+                ar.EVENT_AREA_REGISTRY_UPDATED, self._on_area_registry_change
             )
         )
 
@@ -107,10 +111,12 @@ class EntityEmbeddingIndex:
         """
         if not self._ready or not self._embeddings or self._building:
             _LOGGER.debug(
-                "Embedding index %s, returning all entities",
+                "Embedding index %s, returning all entities (capped at %d)",
                 "rebuilding" if self._building else "not ready",
+                self.top_k,
             )
-            return self._entity_ids
+            # Cap at top_k to avoid flooding the LLM context with all 150+ entities
+            return self._entity_ids[: self._top_k]
 
         try:
             query_vec = await self._embed([query])
@@ -135,8 +141,25 @@ class EntityEmbeddingIndex:
     # ------------------------------------------------------------------
 
     @callback
-    def _on_registry_change(self, event: Event) -> None:
-        """Debounced rebuild when the entity or area registry changes."""
+    def _on_entity_registry_change(self, event: Event) -> None:
+        """Rebuild only when entity fields relevant to our index change."""
+        action = event.data.get("action", "")
+        if action == "update":
+            # HA fires "update" for many internal tweaks (last_changed, context, etc.)
+            # Only rebuild when something that affects names, areas, or exposure changes.
+            changes = event.data.get("changes", {})
+            if not (_RELEVANT_ENTITY_CHANGES & set(changes.keys())):
+                return
+        self._schedule_debounced_rebuild()
+
+    @callback
+    def _on_area_registry_change(self, event: Event) -> None:
+        """Any area change may affect display names — always rebuild."""
+        self._schedule_debounced_rebuild()
+
+    @callback
+    def _schedule_debounced_rebuild(self) -> None:
+        """Cancel any pending rebuild and restart the debounce timer."""
         if self._rebuild_handle:
             self._rebuild_handle.cancel()
         self._rebuild_handle = self.hass.loop.call_later(

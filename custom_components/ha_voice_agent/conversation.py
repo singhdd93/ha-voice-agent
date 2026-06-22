@@ -224,6 +224,7 @@ class HAVoiceAgentEntity(ConversationEntity, conversation.AbstractConversationAg
         user_input: ConversationInput,
         messages: list[dict[str, Any]],
         depth: int,
+        force_no_tools: bool = False,
     ) -> str:
         opts = self.entry.options
         max_tool_calls = opts.get(CONF_MAX_TOOL_CALLS, DEFAULT_MAX_TOOL_CALLS)
@@ -236,7 +237,7 @@ class HAVoiceAgentEntity(ConversationEntity, conversation.AbstractConversationAg
             ollama_url=opts.get(CONF_OLLAMA_URL, DEFAULT_OLLAMA_URL),
             model=opts.get(CONF_MODEL, DEFAULT_MODEL),
             messages=messages,
-            tools=[EXECUTE_SERVICES_TOOL],
+            tools=None if force_no_tools else [EXECUTE_SERVICES_TOOL],
             num_ctx=opts.get(CONF_NUM_CTX, DEFAULT_NUM_CTX),
             temperature=opts.get(CONF_TEMPERATURE, DEFAULT_TEMPERATURE),
             num_predict=opts.get(CONF_MAX_TOKENS, DEFAULT_MAX_TOKENS),
@@ -256,6 +257,20 @@ class HAVoiceAgentEntity(ConversationEntity, conversation.AbstractConversationAg
 
         if not tool_calls:
             return content.strip() or "Sorry, I didn't get a complete response. Please try again."
+
+        # If every tool call is a state query (no control actions), the model is trying
+        # to use tools to look up state it already has in its context. Re-run without
+        # tools so it's forced to answer directly from the system prompt.
+        all_query = all(
+            tc.get("function", {}).get("arguments", {}).get("service", "") in self._QUERY_SERVICE_NAMES
+            for tc in tool_calls
+        )
+        if all_query and not force_no_tools:
+            _LOGGER.info(
+                "Model made %d query-only tool call(s) — re-running without tools to force context read",
+                len(tool_calls),
+            )
+            return await self._query(user_input, messages, depth + 1, force_no_tools=True)
 
         messages.append(msg)
 

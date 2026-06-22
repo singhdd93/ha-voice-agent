@@ -13,6 +13,7 @@ CONF_NUM_CTX = "num_ctx"
 CONF_EMBED_MODEL = "embed_model"
 CONF_TOP_K = "top_k"
 CONF_VECTOR_SEARCH = "vector_search"
+CONF_LLM_LOG_LEVEL = "llm_log_level"
 
 # Defaults
 DEFAULT_OLLAMA_URL = "http://10.5.6.50:11434"
@@ -24,6 +25,8 @@ DEFAULT_NUM_CTX = 4096
 DEFAULT_EMBED_MODEL = "nomic-embed-text-v2-moe:latest"
 DEFAULT_TOP_K = 15
 DEFAULT_VECTOR_SEARCH = True
+DEFAULT_LLM_LOG_LEVEL = "warning"
+LLM_LOG_LEVELS = ["warning", "info", "debug"]
 
 DEFAULT_SYSTEM_PROMPT = """\
 You are a smart home voice assistant controlling Home Assistant at {{ ha_name }}.
@@ -31,7 +34,7 @@ Current time: {{ now().strftime('%H:%M, %A %d %B %Y') }}
 
 Available devices:
 {% for entity in exposed_entities -%}
-- {{ entity.entity_id }} | {{ entity.name }} | {{ entity.state }}{% if entity.attributes %} | {{ entity.attributes }}{% endif %}
+- {{ entity.entity_id }} | {{ entity.name }}{% if entity.area %} [{{ entity.area }}]{% endif %} | {{ entity.state }}{% if entity.attributes %} | {{ entity.attributes }}{% endif %}
 
 {% endfor %}
 
@@ -45,7 +48,11 @@ Rules:
 7. For TV power: use remote.turn_on / remote.turn_off on remote.* entities.
 8. After executing any action, always respond with a brief confirmation sentence.
 9. If asked about device state, answer directly from Available devices — do not call a service.
-10. ALWAYS respond in 1-2 sentences maximum. Never explain, never offer options, never elaborate.\
+10. ALWAYS respond in 1-2 sentences maximum. Never explain, never offer options, never elaborate.
+11. For fan status or speed, read from the fan.* entity (state + percentage attribute). Ignore any sensor.* entities — they duplicate data already in the fan.* entry.
+12. Area matching: the area name is shown in [brackets] after the entity name. When a user says "blue room fan", match it to any fan entity whose area is "Blue Room" — the entity's friendly name may differ (e.g., "Guest Bedroom Fan"). Always prefer area match over name match for room-based queries.
+13. NEVER output your reasoning, thought process, or how you found the answer. NEVER output JSON, Python dicts, entity IDs, parameter names, or any structured data in your spoken response. Bad: "For X, since it is a query I will provide... {'name': ...}". Good: "The fan is on at 33%."
+14. Start your reply with the answer immediately. No preamble, no "Based on...", no "Since this is a query...", no "I will...".\
 """
 
 # Domain → attributes to inject into context

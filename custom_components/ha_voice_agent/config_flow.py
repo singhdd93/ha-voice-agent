@@ -9,6 +9,7 @@ from homeassistant.core import callback
 
 from .const import (
     CONF_EMBED_MODEL,
+    CONF_LLM_LOG_LEVEL,
     CONF_MAX_TOKENS,
     CONF_MAX_TOOL_CALLS,
     CONF_MODEL,
@@ -19,6 +20,7 @@ from .const import (
     CONF_TOP_K,
     CONF_VECTOR_SEARCH,
     DEFAULT_EMBED_MODEL,
+    DEFAULT_LLM_LOG_LEVEL,
     DEFAULT_MAX_TOKENS,
     DEFAULT_MAX_TOOL_CALLS,
     DEFAULT_MODEL,
@@ -29,6 +31,7 @@ from .const import (
     DEFAULT_TOP_K,
     DEFAULT_VECTOR_SEARCH,
     DOMAIN,
+    LLM_LOG_LEVELS,
 )
 from .ollama_client import test_connection
 
@@ -122,6 +125,10 @@ class HAVoiceAgentOptionsFlow(OptionsFlow):
                     CONF_SYSTEM_PROMPT,
                     default=opts.get(CONF_SYSTEM_PROMPT, DEFAULT_SYSTEM_PROMPT),
                 ): str,
+                vol.Optional(
+                    CONF_LLM_LOG_LEVEL,
+                    default=opts.get(CONF_LLM_LOG_LEVEL, DEFAULT_LLM_LOG_LEVEL),
+                ): vol.In(LLM_LOG_LEVELS),
             }
         )
         return self.async_show_form(step_id="init", data_schema=schema)

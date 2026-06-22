@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -10,6 +11,54 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 _LOGGER = logging.getLogger(__name__)
+
+# Chunk size for splitting long messages in Loki logs (chars per line)
+_LOG_CHUNK = 900
+
+
+def _log_llm_request(
+    model: str,
+    messages: list[dict],
+    num_ctx: int,
+    num_predict: int,
+    log_level: str,
+) -> None:
+    """Log the full LLM request in Loki-readable chunks.
+
+    log_level controls verbosity:
+      warning — silent (nothing logged here)
+      info    — LLM_REQUEST summary + per-message chunks at INFO
+      debug   — same as info (detail lives in HA debug logs elsewhere)
+    """
+    if log_level not in ("info", "debug"):
+        return
+
+    _LOGGER.info(
+        "LLM_REQUEST model=%s msg_count=%d num_ctx=%d num_predict=%d",
+        model, len(messages), num_ctx, num_predict,
+    )
+    for i, msg in enumerate(messages):
+        role = msg.get("role", "unknown")
+        content = msg.get("content") or ""
+        tool_calls = msg.get("tool_calls")
+
+        if tool_calls:
+            _LOGGER.info(
+                "LLM_MSG[%d/%d] role=%s tool_calls=%s",
+                i + 1, len(messages), role, json.dumps(tool_calls, ensure_ascii=False),
+            )
+            continue
+
+        if not content:
+            _LOGGER.info("LLM_MSG[%d/%d] role=%s (empty)", i + 1, len(messages), role)
+            continue
+
+        chunks = [content[k : k + _LOG_CHUNK] for k in range(0, len(content), _LOG_CHUNK)]
+        for j, chunk in enumerate(chunks):
+            _LOGGER.info(
+                "LLM_MSG[%d/%d] role=%s part=%d/%d len=%d: %s",
+                i + 1, len(messages), role, j + 1, len(chunks), len(content), chunk,
+            )
 
 
 class OllamaError(Exception):
@@ -26,6 +75,7 @@ async def chat(
     temperature: float = 0.1,
     num_predict: int = 512,
     timeout: float = 30.0,
+    log_level: str = "warning",
 ) -> dict[str, Any]:
     """
     Call Ollama /api/chat and return the parsed response dict.
@@ -66,6 +116,7 @@ async def chat(
         payload["tools"] = tools
 
     url = f"{ollama_url.rstrip('/')}/api/chat"
+    _log_llm_request(model, messages, num_ctx, num_predict, log_level)
     _LOGGER.debug("Ollama request → %s  model=%s  msgs=%d", url, model, len(messages))
 
     session = async_get_clientsession(hass)
@@ -83,11 +134,13 @@ async def chat(
     except aiohttp.ClientError as err:
         raise OllamaError(f"Could not reach Ollama at {url}: {err}") from err
 
-    _LOGGER.debug(
-        "Ollama response: done_reason=%s prompt_tokens=%s gen_tokens=%s",
+    _LOGGER.info(
+        "LLM_RESPONSE model=%s done_reason=%s prompt_tokens=%s gen_tokens=%s content_len=%s",
+        model,
         data.get("done_reason"),
         data.get("prompt_eval_count"),
         data.get("eval_count"),
+        len((data.get("message") or {}).get("content") or ""),
     )
     return data
 

@@ -31,6 +31,7 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .const import (
     CONF_EMBED_MODEL,
+    CONF_LLM_LOG_LEVEL,
     CONF_MAX_TOKENS,
     CONF_MAX_TOOL_CALLS,
     CONF_MODEL,
@@ -41,6 +42,7 @@ from .const import (
     CONF_TOP_K,
     CONF_VECTOR_SEARCH,
     DEFAULT_EMBED_MODEL,
+    DEFAULT_LLM_LOG_LEVEL,
     DEFAULT_MAX_TOKENS,
     DEFAULT_MAX_TOOL_CALLS,
     DEFAULT_MODEL,
@@ -238,6 +240,7 @@ class HAVoiceAgentEntity(ConversationEntity, conversation.AbstractConversationAg
             num_ctx=opts.get(CONF_NUM_CTX, DEFAULT_NUM_CTX),
             temperature=opts.get(CONF_TEMPERATURE, DEFAULT_TEMPERATURE),
             num_predict=opts.get(CONF_MAX_TOKENS, DEFAULT_MAX_TOKENS),
+            log_level=opts.get(CONF_LLM_LOG_LEVEL, DEFAULT_LLM_LOG_LEVEL),
         )
 
         msg = data.get("message", {})
@@ -321,8 +324,10 @@ class HAVoiceAgentEntity(ConversationEntity, conversation.AbstractConversationAg
     # ------------------------------------------------------------------
 
     def _get_all_exposed_entities(self) -> list[dict[str, Any]]:
-        """Return all exposed entities with state + domain attributes."""
+        """Return all exposed entities with state + domain attributes + area name."""
         entity_reg = er.async_get(self.hass)
+        area_reg = ar.async_get(self.hass)
+        dev_reg = dr.async_get(self.hass)
         result = []
         for state in self.hass.states.async_all():
             if not async_should_expose(self.hass, conversation.DOMAIN, state.entity_id):
@@ -331,18 +336,22 @@ class HAVoiceAgentEntity(ConversationEntity, conversation.AbstractConversationAg
             domain = state.domain
             attr_keys = DOMAIN_ATTRIBUTES.get(domain, [])
             attrs = {k: v for k in attr_keys if (v := state.attributes.get(k)) is not None}
+            area_name = self._resolve_area_name(entity, dev_reg, area_reg)
             result.append({
                 "entity_id": state.entity_id,
                 "name": state.name,
                 "state": state.state,
                 "attributes": attrs or None,
                 "aliases": (entity.aliases or []) if entity else [],
+                "area": area_name,
             })
         return result
 
     def _get_entities_by_ids(self, entity_ids: set[str]) -> list[dict[str, Any]]:
         """Return entity dicts for the given entity_id set."""
         entity_reg = er.async_get(self.hass)
+        area_reg = ar.async_get(self.hass)
+        dev_reg = dr.async_get(self.hass)
         result = []
         for eid in entity_ids:
             state = self.hass.states.get(eid)
@@ -354,14 +363,35 @@ class HAVoiceAgentEntity(ConversationEntity, conversation.AbstractConversationAg
             domain = state.domain
             attr_keys = DOMAIN_ATTRIBUTES.get(domain, [])
             attrs = {k: v for k in attr_keys if (v := state.attributes.get(k)) is not None}
+            area_name = self._resolve_area_name(entity, dev_reg, area_reg)
             result.append({
                 "entity_id": eid,
                 "name": state.name,
                 "state": state.state,
                 "attributes": attrs or None,
                 "aliases": (entity.aliases or []) if entity else [],
+                "area": area_name,
             })
         return result
+
+    def _resolve_area_name(
+        self,
+        entity: er.RegistryEntry | None,
+        dev_reg: dr.DeviceRegistry,
+        area_reg: ar.AreaRegistry,
+    ) -> str | None:
+        """Return area name for an entity (entity area → device area → None)."""
+        if entity is None:
+            return None
+        area_id = entity.area_id
+        if not area_id and entity.device_id:
+            device = dev_reg.async_get(entity.device_id)
+            if device:
+                area_id = device.area_id
+        if not area_id:
+            return None
+        area = area_reg.async_get_area(area_id)
+        return area.name if area else None
 
     def _get_area_entity_ids(self, device_id: str | None) -> set[str]:
         """Return entity_ids of all exposed entities in the same area as device_id."""

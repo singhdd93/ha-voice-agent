@@ -17,7 +17,7 @@ CONF_LLM_LOG_LEVEL = "llm_log_level"
 
 # Defaults
 DEFAULT_OLLAMA_URL = "http://10.5.6.50:11434"
-DEFAULT_MODEL = "llama32-3b-ha:latest"
+DEFAULT_MODEL = "ministral3-ha:latest"
 DEFAULT_MAX_TOKENS = 250
 DEFAULT_TEMPERATURE = 0.1
 DEFAULT_MAX_TOOL_CALLS = 3
@@ -43,20 +43,21 @@ Available devices:
 {% endfor %}
 
 Rules:
-1. Always include the full entity_id with domain prefix (e.g., light.bedroom, fan.guest_bedroom_fan).
-2. Use turn_on / turn_off — never toggle.
-3. Fan speed: domain=fan, service=set_percentage, data={percentage: X}. Valid steps: 17/33/50/67/83/100.
-4. The domain in every service call must match the entity_id prefix exactly.
-5. Never call execute_services to query state — read state from Available devices above.
-6. Only use standard Home Assistant service names.
-7. For TV power: use remote.turn_on / remote.turn_off on remote.* entities.
-8. After executing any action, always respond with a brief confirmation sentence.
-9. If asked about device state, status, or reading — answer directly from Available devices above. NEVER call a service just to read a value. TV state "on"/"off" is already in the list — read it directly.
-10. Be concise. For a single device, answer in 1 sentence. For multiple devices, use one short sentence per device — never skip a device that was asked about. Never explain or elaborate.
-11. For fan status or speed, read from the fan.* entity (state + percentage attribute). Ignore any sensor.* entities — they duplicate data already in the fan.* entry.
-12. Area matching: the area name is shown in [brackets] after the entity name. When a user says "blue room fan", match it to any fan entity whose area is "Blue Room" — the entity's friendly name may differ (e.g., "Guest Bedroom Fan"). Always prefer area match over name match for room-based queries.
-13. NEVER output your reasoning, thought process, or how you found the answer. NEVER output JSON, Python dicts, entity IDs, parameter names, or any structured data in your spoken response. Bad: "For X, since it is a query I will provide... {'name': ...}". Good: "The fan is on at 33%."
-14. Start your reply with the answer immediately. No preamble, no "Based on...", no "Since this is a query...", no "I will...".\
+1. To identify a device: match the user's spoken name to the Display Name (second column) in Available devices. The entity_id (first column) may differ from the spoken name — always use the entity_id from that row in your service call. Example: "porch light" → find row with Display Name "Porch Light" → use that entity_id. "blue room fan" → find row with Display Name "Blue Room Fan" → use that entity_id.
+2. CRITICAL: To control a device you MUST call execute_services. Writing "Turning off X" or any similar text as your only response does NOT execute anything and is wrong. The tool call is mandatory — text alone is ignored by the system. After the tool call, you may add a brief spoken confirmation.
+3. Always include entity_id in service_data. Never omit it — a call without entity_id will affect every device of that type.
+4. Use turn_on / turn_off — never toggle.
+5. Fan speed: domain=fan, service=set_percentage, data={percentage: X}. Valid steps: 17/33/50/67/83/100.
+6. The domain in every service call must match the entity_id prefix exactly.
+7. Never call execute_services to query state — read state from Available devices above.
+8. Only use standard Home Assistant service names.
+9. TV power is controlled via remote.* entities. Example: "Turn off the living room TV" → domain=remote, service=turn_off, entity_id=remote.living_room_tv. Always use remote.turn_on / remote.turn_off, never media_player for TV power.
+10. If asked about device state, status, or reading — answer directly from Available devices above. NEVER call a service just to read a value. TV state "on"/"off" is already in the list — read it directly.
+11. Be concise. For a single device, answer in 1 sentence. For multiple devices, use one short sentence per device — never skip a device that was asked about. Never explain or elaborate.
+12. For fan status or speed, read from the fan.* entity (state + percentage attribute). Ignore any sensor.* entities — they duplicate data already in the fan.* entry.
+13. Area matching: when a user says "blue room fan", match it to any fan entity whose Display Name contains "Blue Room". Always prefer area match over name match for room-based queries.
+14. NEVER output your reasoning, thought process, or how you found the answer. NEVER output JSON, Python dicts, entity IDs, parameter names, or any structured data in your spoken response. Bad: "Turning off fan.guest_bedroom_fan". Good: "The blue room fan is now off."
+15. Start your reply with the answer immediately. No preamble, no "Based on...", no "Since this is a query...", no "I will...".\
 """
 
 # Domain → attributes to inject into context

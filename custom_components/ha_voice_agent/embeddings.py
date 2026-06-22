@@ -7,7 +7,7 @@ import logging
 import math
 from typing import Any
 
-import httpx
+import aiohttp
 
 from homeassistant.components import conversation
 from homeassistant.components.homeassistant.exposed_entities import async_should_expose
@@ -227,13 +227,16 @@ class EntityEmbeddingIndex:
 
     async def _embed(self, texts: list[str]) -> list[list[float]]:
         """Call Ollama /api/embed and return list of embedding vectors."""
+        from homeassistant.helpers.aiohttp_client import async_get_clientsession
+
         url = f"{self.ollama_url}/api/embed"
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                url,
-                json={"model": self.embed_model, "input": texts},
-                timeout=60.0,
-            )
+        session = async_get_clientsession(self.hass)
+        timeout = aiohttp.ClientTimeout(total=60.0)
+        async with session.post(
+            url,
+            json={"model": self.embed_model, "input": texts},
+            timeout=timeout,
+        ) as resp:
             resp.raise_for_status()
-        data = resp.json()
+            data = await resp.json()
         return data.get("embeddings", [])

@@ -32,9 +32,13 @@ DEFAULT_SYSTEM_PROMPT = """\
 You are a smart home voice assistant controlling Home Assistant at {{ ha_name }}.
 Current time: {{ now().strftime('%H:%M, %A %d %B %Y') }}
 
+{% set area_type_labels = {"fan": "Fan", "light": "Light", "climate": "AC", "remote": "TV", "media_player": "Speaker", "switch": "Switch", "cover": "Blind"} -%}
 Available devices:
 {% for entity in exposed_entities -%}
-- {{ entity.entity_id }} | {{ entity.name }}{% if entity.area %} [{{ entity.area }}]{% endif %} | {{ entity.state }}{% if entity.attributes %} | {{ entity.attributes }}{% endif %}
+{% set domain = entity.entity_id.split('.')[0] -%}
+{% set type_label = area_type_labels[domain] if domain in area_type_labels else '' -%}
+{% set display = (entity.area ~ ' ' ~ type_label) if (entity.area and type_label) else entity.name -%}
+- {{ entity.entity_id }} | {{ display }} | {{ entity.state }}{% if entity.attributes %} | {{ entity.attributes }}{% endif %}
 
 {% endfor %}
 

@@ -259,17 +259,23 @@ class HAVoiceAgentEntity(ConversationEntity, conversation.AbstractConversationAg
             return content.strip() or "Sorry, I didn't get a complete response. Please try again."
 
         # If every tool call is a state query (no control actions), the model is trying
-        # to use tools to look up state it already has in its context. Re-run without
-        # tools so it's forced to answer directly from the system prompt.
+        # to use tools to look up state it already has in its context. Resolve the state
+        # programmatically and inject it, then do a final no-tools call.
         all_query = all(
             tc.get("function", {}).get("arguments", {}).get("service", "") in self._QUERY_SERVICE_NAMES
             for tc in tool_calls
         )
         if all_query and not force_no_tools:
+            state_text = self._try_direct_state_lookup(user_input.text)
             _LOGGER.info(
-                "Model made %d query-only tool call(s) — re-running without tools to force context read",
-                len(tool_calls),
+                "Model made %d query-only tool call(s) — direct lookup: %s",
+                len(tool_calls), state_text or "no match",
             )
+            if state_text:
+                # Inject assistant tool-call msg + synthetic result, then answer without tools
+                messages.append(msg)
+                for _ in tool_calls:
+                    messages.append({"role": "tool", "content": state_text})
             return await self._query(user_input, messages, depth + 1, force_no_tools=True)
 
         messages.append(msg)
@@ -366,6 +372,90 @@ class HAVoiceAgentEntity(ConversationEntity, conversation.AbstractConversationAg
             except HomeAssistantError as err:
                 _LOGGER.error("Service %s.%s failed: %s", domain, service, err)
                 results.append(f"{domain}.{service}: failed — {err}")
+
+        return "; ".join(results)
+
+    # Keyword → HA domain for direct state lookup
+    _DOMAIN_KEYWORDS: dict[str, str] = {
+        "fan": "fan",
+        "light": "light",
+        "lamp": "light",
+        "ac": "climate",
+        "aircon": "climate",
+        "aircondition": "climate",
+        "airconditioner": "climate",
+        "tv": "remote",
+        "television": "remote",
+        "speaker": "media_player",
+        "switch": "switch",
+        "blind": "cover",
+        "curtain": "cover",
+    }
+
+    def _try_direct_state_lookup(self, user_text: str) -> str | None:
+        """Resolve a state query by matching area name + device type from the user text.
+
+        Returns a formatted state string if a match is found, else None.
+        """
+        area_reg = ar.async_get(self.hass)
+        entity_reg = er.async_get(self.hass)
+        dev_reg = dr.async_get(self.hass)
+
+        # Normalise query for substring matching (strip spaces, dashes, underscores)
+        def _norm(s: str) -> str:
+            return s.lower().replace(" ", "").replace("-", "").replace("_", "")
+
+        query_norm = _norm(user_text)
+
+        # Find which HA areas appear in the query
+        matched_areas: list[tuple[str, str]] = []  # (area_id, area_name)
+        for area in area_reg.async_list_areas():
+            if _norm(area.name) in query_norm:
+                matched_areas.append((area.id, area.name))
+
+        if not matched_areas:
+            return None
+
+        # Find which device domain the query refers to
+        target_domain: str | None = None
+        for keyword, domain in self._DOMAIN_KEYWORDS.items():
+            if keyword in query_norm:
+                target_domain = domain
+                break
+
+        # Collect matching exposed entities
+        results: list[str] = []
+        for area_id, area_name in matched_areas:
+            for entry in entity_reg.entities.values():
+                # Resolve entity area (entity level → device level)
+                eid_area = entry.area_id
+                if not eid_area and entry.device_id:
+                    device = dev_reg.async_get(entry.device_id)
+                    if device:
+                        eid_area = device.area_id
+
+                if eid_area != area_id:
+                    continue
+                if not async_should_expose(self.hass, conversation.DOMAIN, entry.entity_id):
+                    continue
+
+                entity_domain = entry.entity_id.split(".")[0]
+                if target_domain and entity_domain != target_domain:
+                    continue
+
+                state = self.hass.states.get(entry.entity_id)
+                if state is None:
+                    continue
+
+                attr_keys = DOMAIN_ATTRIBUTES.get(entity_domain, [])
+                attrs = {k: v for k in attr_keys if (v := state.attributes.get(k)) is not None}
+                summary = f"{entry.entity_id} ({state.name}, area: {area_name}) is {state.state}"
+                if attrs:
+                    summary += f" | {attrs}"
+                results.append(summary)
+
+        if not results:
+            return None
 
         return "; ".join(results)
 

@@ -71,14 +71,11 @@ class HAVoiceAgentConfigFlow(ConfigFlow, domain=DOMAIN):
     @staticmethod
     @callback
     def async_get_options_flow(config_entry) -> HAVoiceAgentOptionsFlow:
-        return HAVoiceAgentOptionsFlow(config_entry)
+        return HAVoiceAgentOptionsFlow()
 
 
 class HAVoiceAgentOptionsFlow(OptionsFlow):
     """Handle options for HA Voice Agent."""
-
-    def __init__(self, config_entry) -> None:
-        self.config_entry = config_entry
 
     async def async_step_init(self, user_input=None) -> ConfigFlowResult:
         opts = self.config_entry.options

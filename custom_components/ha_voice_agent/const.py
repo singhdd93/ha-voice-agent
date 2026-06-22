@@ -10,6 +10,9 @@ CONF_MAX_TOKENS = "max_tokens"
 CONF_TEMPERATURE = "temperature"
 CONF_MAX_TOOL_CALLS = "max_tool_calls"
 CONF_NUM_CTX = "num_ctx"
+CONF_EMBED_MODEL = "embed_model"
+CONF_TOP_K = "top_k"
+CONF_VECTOR_SEARCH = "vector_search"
 
 # Defaults
 DEFAULT_OLLAMA_URL = "http://10.5.6.50:11434"
@@ -18,6 +21,9 @@ DEFAULT_MAX_TOKENS = 512
 DEFAULT_TEMPERATURE = 0.1
 DEFAULT_MAX_TOOL_CALLS = 3
 DEFAULT_NUM_CTX = 4096
+DEFAULT_EMBED_MODEL = "nomic-embed-text-v2-moe:latest"
+DEFAULT_TOP_K = 15
+DEFAULT_VECTOR_SEARCH = True
 
 DEFAULT_SYSTEM_PROMPT = """\
 You are a smart home voice assistant controlling Home Assistant at {{ ha_name }}.

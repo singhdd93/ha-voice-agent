@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any, Literal
 
@@ -21,6 +20,7 @@ from homeassistant.const import MATCH_ALL
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import (
+    area_registry as ar,
     device_registry as dr,
     entity_registry as er,
     intent,
@@ -30,6 +30,7 @@ from homeassistant.helpers.chat_session import async_get_chat_session
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .const import (
+    CONF_EMBED_MODEL,
     CONF_MAX_TOKENS,
     CONF_MAX_TOOL_CALLS,
     CONF_MODEL,
@@ -37,6 +38,9 @@ from .const import (
     CONF_OLLAMA_URL,
     CONF_SYSTEM_PROMPT,
     CONF_TEMPERATURE,
+    CONF_TOP_K,
+    CONF_VECTOR_SEARCH,
+    DEFAULT_EMBED_MODEL,
     DEFAULT_MAX_TOKENS,
     DEFAULT_MAX_TOOL_CALLS,
     DEFAULT_MODEL,
@@ -44,10 +48,13 @@ from .const import (
     DEFAULT_OLLAMA_URL,
     DEFAULT_SYSTEM_PROMPT,
     DEFAULT_TEMPERATURE,
+    DEFAULT_TOP_K,
+    DEFAULT_VECTOR_SEARCH,
     DOMAIN,
     DOMAIN_ATTRIBUTES,
     EXECUTE_SERVICES_TOOL,
 )
+from .embeddings import EntityEmbeddingIndex
 from .ollama_client import OllamaError, chat as ollama_chat
 
 _LOGGER = logging.getLogger(__name__)
@@ -80,10 +87,33 @@ class HAVoiceAgentEntity(ConversationEntity, conversation.AbstractConversationAg
             model=entry.options.get(CONF_MODEL, DEFAULT_MODEL),
             entry_type=dr.DeviceEntryType.SERVICE,
         )
+        self._embed_index: EntityEmbeddingIndex | None = None
 
     @property
     def supported_languages(self) -> list[str] | Literal["*"]:
         return MATCH_ALL
+
+    async def async_added_to_hass(self) -> None:
+        """Build the embedding index after HA is ready."""
+        await super().async_added_to_hass()
+        opts = self.entry.options
+        if opts.get(CONF_VECTOR_SEARCH, DEFAULT_VECTOR_SEARCH):
+            self._embed_index = EntityEmbeddingIndex(
+                hass=self.hass,
+                ollama_url=opts.get(CONF_OLLAMA_URL, DEFAULT_OLLAMA_URL),
+                embed_model=opts.get(CONF_EMBED_MODEL, DEFAULT_EMBED_MODEL),
+                top_k=opts.get(CONF_TOP_K, DEFAULT_TOP_K),
+            )
+            # Build index from currently exposed entities (non-blocking)
+            all_entities = self._get_all_exposed_entities()
+            self.hass.async_create_task(
+                self._embed_index.async_setup(all_entities)
+            )
+
+    async def async_will_remove_from_hass(self) -> None:
+        """Clean up listeners."""
+        if self._embed_index:
+            self._embed_index.async_teardown()
 
     # ------------------------------------------------------------------
     # HA conversation agent entry point
@@ -101,27 +131,47 @@ class HAVoiceAgentEntity(ConversationEntity, conversation.AbstractConversationAg
         self, user_input: ConversationInput, chat_log: ChatLog
     ) -> ConversationResult:
         conversation_id = chat_log.conversation_id
-        exposed_entities = self._get_exposed_entities()
 
-        # Build system message with rendered prompt
+        # --- Entity selection: vector search + area union ---
+        opts = self.entry.options
+        use_vector = opts.get(CONF_VECTOR_SEARCH, DEFAULT_VECTOR_SEARCH)
+
+        if use_vector and self._embed_index and self._embed_index.is_ready:
+            top_ids = await self._embed_index.async_search(user_input.text)
+            area_ids = self._get_area_entity_ids(user_input.device_id)
+            selected_ids = set(top_ids) | area_ids
+            exposed_entities = self._get_entities_by_ids(selected_ids)
+            _LOGGER.info(
+                "Vector search: %d top + %d area = %d total entities (from %d)",
+                len(top_ids),
+                len(area_ids),
+                len(exposed_entities),
+                len(self._embed_index._entity_ids),
+            )
+        else:
+            exposed_entities = self._get_all_exposed_entities()
+            _LOGGER.info(
+                "Vector search %s — using all %d entities",
+                "disabled" if not use_vector else "index not ready",
+                len(exposed_entities),
+            )
+
+        # Build messages
         system_prompt = self._render_prompt(exposed_entities, user_input)
         messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
 
-        # Add history from previous turns in this conversation
         for msg in chat_log.content:
             if hasattr(msg, "role") and hasattr(msg, "content"):
                 if msg.role in ("user", "assistant") and msg.content:
                     messages.append({"role": msg.role, "content": msg.content})
 
-        # Add current user message
         messages.append({"role": "user", "content": user_input.text})
 
         _LOGGER.info(
-            "HA Voice Agent: conversation=%s entities=%d prompt_msgs=%d query=%r",
-            conversation_id,
+            "Query: %r  entities_in_prompt=%d  msgs=%d",
+            user_input.text,
             len(exposed_entities),
             len(messages),
-            user_input.text,
         )
 
         try:
@@ -137,7 +187,7 @@ class HAVoiceAgentEntity(ConversationEntity, conversation.AbstractConversationAg
                 response=intent_response, conversation_id=conversation_id
             )
         except HomeAssistantError as err:
-            _LOGGER.error("HA error during tool execution: %s", err, exc_info=True)
+            _LOGGER.error("HA error: %s", err, exc_info=True)
             intent_response = intent.IntentResponse(language=user_input.language)
             intent_response.async_set_error(
                 intent.IntentResponseErrorCode.UNKNOWN,
@@ -163,12 +213,10 @@ class HAVoiceAgentEntity(ConversationEntity, conversation.AbstractConversationAg
         messages: list[dict[str, Any]],
         depth: int,
     ) -> str:
-        """Call Ollama, execute tool calls if present, return final text."""
         opts = self.entry.options
         max_tool_calls = opts.get(CONF_MAX_TOOL_CALLS, DEFAULT_MAX_TOOL_CALLS)
 
         if depth > max_tool_calls:
-            _LOGGER.warning("Max tool call depth (%d) reached", max_tool_calls)
             return "I'm sorry, I ran into a problem completing that request."
 
         data = await ollama_chat(
@@ -184,24 +232,12 @@ class HAVoiceAgentEntity(ConversationEntity, conversation.AbstractConversationAg
         msg = data.get("message", {})
         content: str = msg.get("content") or ""
         tool_calls: list[dict] = msg.get("tool_calls") or []
-        done_reason: str = data.get("done_reason", "stop")
 
-        _LOGGER.debug(
-            "Ollama response depth=%d done_reason=%s tool_calls=%d content=%r",
-            depth,
-            done_reason,
-            len(tool_calls),
-            content[:120],
-        )
-
-        # No tool calls — return the content directly
         if not tool_calls:
             return content.strip()
 
-        # Append assistant message (with tool calls) to history
         messages.append(msg)
 
-        # Execute each tool call
         for tc in tool_calls:
             fn = tc.get("function", {})
             fn_name = fn.get("name", "")
@@ -213,17 +249,11 @@ class HAVoiceAgentEntity(ConversationEntity, conversation.AbstractConversationAg
                 _LOGGER.warning("Unknown tool: %s", fn_name)
                 result = f"Unknown tool: {fn_name}"
 
-            # Feed tool result back
-            messages.append({
-                "role": "tool",
-                "content": str(result),
-            })
+            messages.append({"role": "tool", "content": str(result)})
 
-        # Recurse for confirmation message
         return await self._query(user_input, messages, depth + 1)
 
     async def _execute_services(self, arguments: dict) -> str:
-        """Execute HA service calls from execute_services tool arguments."""
         service_list = arguments.get("list", [])
         if not service_list:
             return "No services to execute."
@@ -232,76 +262,109 @@ class HAVoiceAgentEntity(ConversationEntity, conversation.AbstractConversationAg
         for call in service_list:
             domain = call.get("domain", "")
             service = call.get("service", "")
-            service_data: dict = call.get("service_data", {})
+            service_data: dict = dict(call.get("service_data", {}))
 
             if not domain or not service:
                 results.append("Skipped: missing domain or service.")
                 continue
 
-            # Move entity_id from service_data into target if present
             entity_id = service_data.pop("entity_id", None)
             target: dict[str, Any] = {}
             if entity_id:
                 target["entity_id"] = entity_id
 
             _LOGGER.info(
-                "Executing %s.%s target=%s data=%s", domain, service, target, service_data
+                "Service call: %s.%s  target=%s  data=%s",
+                domain, service, target, service_data,
             )
             try:
                 await self.hass.services.async_call(
                     domain,
                     service,
-                    service_data if service_data else {},
-                    target=target if target else None,
+                    service_data or {},
+                    target=target or None,
                     blocking=True,
                 )
                 results.append(f"{domain}.{service}: OK")
             except HomeAssistantError as err:
-                _LOGGER.error("Service call failed: %s.%s — %s", domain, service, err)
+                _LOGGER.error("Service %s.%s failed: %s", domain, service, err)
                 results.append(f"{domain}.{service}: failed — {err}")
 
         return "; ".join(results)
 
     # ------------------------------------------------------------------
-    # Entity context builders
+    # Entity helpers
     # ------------------------------------------------------------------
 
-    def _get_exposed_entities(self) -> list[dict[str, Any]]:
-        """Return exposed entities with state + domain-specific attributes."""
-        entity_registry = er.async_get(self.hass)
+    def _get_all_exposed_entities(self) -> list[dict[str, Any]]:
+        """Return all exposed entities with state + domain attributes."""
+        entity_reg = er.async_get(self.hass)
         result = []
-
         for state in self.hass.states.async_all():
             if not async_should_expose(self.hass, conversation.DOMAIN, state.entity_id):
                 continue
-
-            entity = entity_registry.async_get(state.entity_id)
+            entity = entity_reg.async_get(state.entity_id)
             domain = state.domain
-
-            # Inject domain-specific attributes
             attr_keys = DOMAIN_ATTRIBUTES.get(domain, [])
-            attrs: dict[str, Any] = {}
-            for key in attr_keys:
-                val = state.attributes.get(key)
-                if val is not None:
-                    attrs[key] = val
-
+            attrs = {k: v for k in attr_keys if (v := state.attributes.get(k)) is not None}
             result.append({
                 "entity_id": state.entity_id,
                 "name": state.name,
                 "state": state.state,
-                "attributes": attrs if attrs else None,
+                "attributes": attrs or None,
                 "aliases": (entity.aliases or []) if entity else [],
             })
-
         return result
+
+    def _get_entities_by_ids(self, entity_ids: set[str]) -> list[dict[str, Any]]:
+        """Return entity dicts for the given entity_id set."""
+        entity_reg = er.async_get(self.hass)
+        result = []
+        for eid in entity_ids:
+            state = self.hass.states.get(eid)
+            if state is None:
+                continue
+            if not async_should_expose(self.hass, conversation.DOMAIN, eid):
+                continue
+            entity = entity_reg.async_get(eid)
+            domain = state.domain
+            attr_keys = DOMAIN_ATTRIBUTES.get(domain, [])
+            attrs = {k: v for k in attr_keys if (v := state.attributes.get(k)) is not None}
+            result.append({
+                "entity_id": eid,
+                "name": state.name,
+                "state": state.state,
+                "attributes": attrs or None,
+                "aliases": (entity.aliases or []) if entity else [],
+            })
+        return result
+
+    def _get_area_entity_ids(self, device_id: str | None) -> set[str]:
+        """Return entity_ids of all exposed entities in the same area as device_id."""
+        if not device_id:
+            return set()
+        dev_reg = dr.async_get(self.hass)
+        device = dev_reg.async_get(device_id)
+        if not device or not device.area_id:
+            return set()
+        entity_reg = er.async_get(self.hass)
+        area_entity_ids = {
+            e.entity_id
+            for e in entity_reg.entities.values()
+            if e.area_id == device.area_id
+            and async_should_expose(self.hass, conversation.DOMAIN, e.entity_id)
+        }
+        _LOGGER.debug(
+            "Area entities for device %s (area %s): %d",
+            device_id, device.area_id, len(area_entity_ids),
+        )
+        return area_entity_ids
 
     def _render_prompt(
         self,
         exposed_entities: list[dict],
         user_input: ConversationInput,
     ) -> str:
-        """Render the system prompt template."""
         raw = self.entry.options.get(CONF_SYSTEM_PROMPT, DEFAULT_SYSTEM_PROMPT)
         try:
             return template.Template(raw, self.hass).async_render(

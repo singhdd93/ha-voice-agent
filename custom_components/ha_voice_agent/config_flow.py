@@ -8,6 +8,7 @@ from homeassistant.config_entries import ConfigFlow, ConfigFlowResult, OptionsFl
 from homeassistant.core import callback
 
 from .const import (
+    CONF_EMBED_MODEL,
     CONF_MAX_TOKENS,
     CONF_MAX_TOOL_CALLS,
     CONF_MODEL,
@@ -15,6 +16,9 @@ from .const import (
     CONF_OLLAMA_URL,
     CONF_SYSTEM_PROMPT,
     CONF_TEMPERATURE,
+    CONF_TOP_K,
+    CONF_VECTOR_SEARCH,
+    DEFAULT_EMBED_MODEL,
     DEFAULT_MAX_TOKENS,
     DEFAULT_MAX_TOOL_CALLS,
     DEFAULT_MODEL,
@@ -22,6 +26,8 @@ from .const import (
     DEFAULT_OLLAMA_URL,
     DEFAULT_SYSTEM_PROMPT,
     DEFAULT_TEMPERATURE,
+    DEFAULT_TOP_K,
+    DEFAULT_VECTOR_SEARCH,
     DOMAIN,
 )
 from .ollama_client import test_connection
@@ -102,6 +108,18 @@ class HAVoiceAgentOptionsFlow(OptionsFlow):
                 vol.Optional(
                     CONF_MAX_TOOL_CALLS,
                     default=opts.get(CONF_MAX_TOOL_CALLS, DEFAULT_MAX_TOOL_CALLS),
+                ): int,
+                vol.Optional(
+                    CONF_VECTOR_SEARCH,
+                    default=opts.get(CONF_VECTOR_SEARCH, DEFAULT_VECTOR_SEARCH),
+                ): bool,
+                vol.Optional(
+                    CONF_EMBED_MODEL,
+                    default=opts.get(CONF_EMBED_MODEL, DEFAULT_EMBED_MODEL),
+                ): str,
+                vol.Optional(
+                    CONF_TOP_K,
+                    default=opts.get(CONF_TOP_K, DEFAULT_TOP_K),
                 ): int,
                 vol.Optional(
                     CONF_SYSTEM_PROMPT,

@@ -29,6 +29,9 @@ Built as a lighter, faster replacement for Extended OpenAI Conversation, with fu
 | Max response tokens | `512` | |
 | Temperature | `0.1` | Lower = more deterministic |
 | Max tool call rounds | `3` | Prevents infinite loops |
+| Vector search | `true` | Enable semantic entity filtering |
+| Embed model | `nomic-embed-text-v2-moe:latest` | Embedding model (must be pulled in Ollama) |
+| Top K entities | `15` | Max entities from vector search (+ area entities always included) |
 | System prompt | (see const.py) | Full Jinja2 template |
 
 ## Tested models

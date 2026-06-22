@@ -103,10 +103,13 @@ class EntityEmbeddingIndex:
     async def async_search(self, query: str) -> list[str]:
         """
         Return up to top_k entity_ids most semantically similar to query.
-        Falls back to returning all entity_ids if the index isn't ready.
+        Falls back to returning all entity_ids if the index isn't ready or is rebuilding.
         """
-        if not self._ready or not self._embeddings:
-            _LOGGER.debug("Embedding index not ready, returning all entities")
+        if not self._ready or not self._embeddings or self._building:
+            _LOGGER.debug(
+                "Embedding index %s, returning all entities",
+                "rebuilding" if self._building else "not ready",
+            )
             return self._entity_ids
 
         try:

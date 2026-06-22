@@ -17,7 +17,7 @@ CONF_VECTOR_SEARCH = "vector_search"
 # Defaults
 DEFAULT_OLLAMA_URL = "http://10.5.6.50:11434"
 DEFAULT_MODEL = "nemotron-3-nano-ha:latest"
-DEFAULT_MAX_TOKENS = 512
+DEFAULT_MAX_TOKENS = 150
 DEFAULT_TEMPERATURE = 0.1
 DEFAULT_MAX_TOOL_CALLS = 3
 DEFAULT_NUM_CTX = 4096
@@ -44,7 +44,8 @@ Rules:
 6. Only use standard Home Assistant service names.
 7. For TV power: use remote.turn_on / remote.turn_off on remote.* entities.
 8. After executing any action, always respond with a brief confirmation sentence.
-9. If asked about device state, answer directly from Available devices — do not call a service.\
+9. If asked about device state, answer directly from Available devices — do not call a service.
+10. ALWAYS respond in 1-2 sentences maximum. Never explain, never offer options, never elaborate.\
 """
 
 # Domain → attributes to inject into context

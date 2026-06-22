@@ -16,7 +16,7 @@ from homeassistant.components.conversation import (
 )
 from homeassistant.components.homeassistant.exposed_entities import async_should_expose
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import MATCH_ALL
+from homeassistant.const import EVENT_HOMEASSISTANT_STARTED, MATCH_ALL
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import (
@@ -94,7 +94,7 @@ class HAVoiceAgentEntity(ConversationEntity, conversation.AbstractConversationAg
         return MATCH_ALL
 
     async def async_added_to_hass(self) -> None:
-        """Build the embedding index after HA is ready."""
+        """Build the embedding index after HA is fully started."""
         await super().async_added_to_hass()
         opts = self.entry.options
         if opts.get(CONF_VECTOR_SEARCH, DEFAULT_VECTOR_SEARCH):
@@ -104,11 +104,21 @@ class HAVoiceAgentEntity(ConversationEntity, conversation.AbstractConversationAg
                 embed_model=opts.get(CONF_EMBED_MODEL, DEFAULT_EMBED_MODEL),
                 top_k=opts.get(CONF_TOP_K, DEFAULT_TOP_K),
             )
-            # Build index from currently exposed entities (non-blocking)
-            all_entities = self._get_all_exposed_entities()
-            self.hass.async_create_task(
-                self._embed_index.async_setup(all_entities)
-            )
+            if self.hass.is_running:
+                # HA already fully started (e.g. integration reload) — build now
+                self.hass.async_create_task(
+                    self._embed_index.async_setup(self._get_all_exposed_entities())
+                )
+            else:
+                # Defer until all integrations have loaded their entities
+                async def _on_ha_started(_event) -> None:
+                    self.hass.async_create_task(
+                        self._embed_index.async_setup(self._get_all_exposed_entities())
+                    )
+
+                self.hass.bus.async_listen_once(
+                    EVENT_HOMEASSISTANT_STARTED, _on_ha_started
+                )
 
     async def async_will_remove_from_hass(self) -> None:
         """Clean up listeners."""

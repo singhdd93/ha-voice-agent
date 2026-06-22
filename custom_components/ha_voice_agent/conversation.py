@@ -172,12 +172,12 @@ class HAVoiceAgentEntity(ConversationEntity, conversation.AbstractConversationAg
         system_prompt = self._render_prompt(exposed_entities, user_input)
         messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
 
+        # chat_log.content already includes the current user turn (added by async_get_chat_log).
+        # Do NOT append user_input.text again — that causes a duplicate that confuses the model.
         for msg in chat_log.content:
             if hasattr(msg, "role") and hasattr(msg, "content"):
                 if msg.role in ("user", "assistant") and msg.content:
                     messages.append({"role": msg.role, "content": msg.content})
-
-        messages.append({"role": "user", "content": user_input.text})
 
         _LOGGER.info(
             "Query: %r  entities_in_prompt=%d  msgs=%d",
@@ -274,14 +274,24 @@ class HAVoiceAgentEntity(ConversationEntity, conversation.AbstractConversationAg
 
         return await self._query(user_input, messages, depth + 1)
 
+    # Service names that look like state queries — not real HA services.
+    _QUERY_SERVICE_NAMES = frozenset({"state", "get", "get_state", "status", "check", "query", "info"})
+
     async def _execute_services(self, arguments: dict) -> str:
+        import ast
         import json as _json
+
         service_list = arguments.get("list", [])
         if isinstance(service_list, str):
             try:
                 service_list = _json.loads(service_list)
             except Exception:
                 service_list = []
+
+        # Model sometimes passes domain/service/service_data at the top level instead of in a list.
+        if not service_list and "domain" in arguments and "service" in arguments:
+            service_list = [arguments]
+
         if not service_list:
             return "No services to execute."
 
@@ -289,10 +299,35 @@ class HAVoiceAgentEntity(ConversationEntity, conversation.AbstractConversationAg
         for call in service_list:
             domain = call.get("domain", "")
             service = call.get("service", "")
-            service_data: dict = dict(call.get("service_data", {}))
+            raw_data = call.get("service_data", {})
+
+            # Parse service_data if the model sent it as a string (Python dict literal or JSON).
+            if isinstance(raw_data, str):
+                try:
+                    raw_data = _json.loads(raw_data)
+                except Exception:
+                    try:
+                        raw_data = ast.literal_eval(raw_data)
+                    except Exception:
+                        raw_data = {}
+
+            service_data: dict = dict(raw_data) if isinstance(raw_data, dict) else {}
 
             if not domain or not service:
                 results.append("Skipped: missing domain or service.")
+                continue
+
+            # Reject query-like service names — model should read state from system prompt.
+            if service in self._QUERY_SERVICE_NAMES:
+                _LOGGER.warning(
+                    "Model tried to call %s.%s — '%s' is not a real HA service. "
+                    "State should be read from the system prompt, not via service calls.",
+                    domain, service, service,
+                )
+                results.append(
+                    f"Error: '{service}' is not a valid Home Assistant service. "
+                    "Read device state from the Available devices list in your context — do not call a service to query state."
+                )
                 continue
 
             entity_id = service_data.pop("entity_id", None)

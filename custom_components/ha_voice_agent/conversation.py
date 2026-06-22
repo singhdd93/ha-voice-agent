@@ -243,9 +243,16 @@ class HAVoiceAgentEntity(ConversationEntity, conversation.AbstractConversationAg
         msg = data.get("message", {})
         content: str = msg.get("content") or ""
         tool_calls: list[dict] = msg.get("tool_calls") or []
+        done_reason: str = data.get("done_reason", "stop")
+
+        if done_reason == "length":
+            _LOGGER.warning(
+                "Response truncated at %d tokens — increase max_tokens if this is frequent",
+                data.get("eval_count", 0),
+            )
 
         if not tool_calls:
-            return content.strip()
+            return content.strip() or "Sorry, I didn't get a complete response. Please try again."
 
         messages.append(msg)
 

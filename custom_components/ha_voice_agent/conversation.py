@@ -311,23 +311,23 @@ class HAVoiceAgentEntity(ConversationEntity, conversation.AbstractConversationAg
                     except Exception:
                         raw_data = {}
 
-            service_data: dict = dict(raw_data) if isinstance(raw_data, dict) else {}
+            # service_data may be a list of entity_ids (model bug) — normalise to dict.
+            if isinstance(raw_data, list):
+                service_data: dict = {"entity_id": raw_data[0] if len(raw_data) == 1 else raw_data}
+            elif isinstance(raw_data, dict):
+                service_data = dict(raw_data)
+            else:
+                service_data = {}
 
             if not domain or not service:
                 results.append("Skipped: missing domain or service.")
                 continue
 
-            # Reject query-like service names — model should read state from system prompt.
+            # When model calls a query-like service (fan.state, fan.get, etc.),
+            # look up the real entity state and return it — don't error.
             if service in self._QUERY_SERVICE_NAMES:
-                _LOGGER.warning(
-                    "Model tried to call %s.%s — '%s' is not a real HA service. "
-                    "State should be read from the system prompt, not via service calls.",
-                    domain, service, service,
-                )
-                results.append(
-                    f"Error: '{service}' is not a valid Home Assistant service. "
-                    "Read device state from the Available devices list in your context — do not call a service to query state."
-                )
+                raw_eid = service_data.get("entity_id", "")
+                results.append(self._lookup_entity_state(domain, raw_eid))
                 continue
 
             entity_id = service_data.pop("entity_id", None)
@@ -353,6 +353,46 @@ class HAVoiceAgentEntity(ConversationEntity, conversation.AbstractConversationAg
                 results.append(f"{domain}.{service}: failed — {err}")
 
         return "; ".join(results)
+
+    def _lookup_entity_state(self, domain: str, raw_entity_id: str | list) -> str:
+        """Resolve a (possibly malformed) entity reference and return its state as text."""
+        # Normalise list to first element.
+        if isinstance(raw_entity_id, list):
+            raw_entity_id = raw_entity_id[0] if raw_entity_id else ""
+
+        candidates: list[str] = []
+        if raw_entity_id:
+            # 1. Try as-is.
+            candidates.append(str(raw_entity_id))
+            # 2. Prepend domain if no dot present.
+            if "." not in str(raw_entity_id):
+                candidates.append(f"{domain}.{raw_entity_id}")
+
+        for eid in candidates:
+            state = self.hass.states.get(eid)
+            if state:
+                attr_keys = DOMAIN_ATTRIBUTES.get(state.domain, [])
+                attrs = {k: v for k in attr_keys if (v := state.attributes.get(k)) is not None}
+                text = f"{eid} is {state.state}"
+                if attrs:
+                    text += f" | {attrs}"
+                _LOGGER.info("State query resolved: %s → %s", eid, text)
+                return text
+
+        # Fallback: fuzzy search across all states in the same domain.
+        needle = str(raw_entity_id).lower().replace("-", "_").replace(" ", "_")
+        for state in self.hass.states.async_all(domain):
+            if needle in state.entity_id:
+                attr_keys = DOMAIN_ATTRIBUTES.get(state.domain, [])
+                attrs = {k: v for k in attr_keys if (v := state.attributes.get(k)) is not None}
+                text = f"{state.entity_id} is {state.state}"
+                if attrs:
+                    text += f" | {attrs}"
+                _LOGGER.info("State query fuzzy-matched %r → %s", raw_entity_id, text)
+                return text
+
+        _LOGGER.warning("State query: could not resolve entity %r in domain %r", raw_entity_id, domain)
+        return f"Could not find entity '{raw_entity_id}' in domain '{domain}'."
 
     # ------------------------------------------------------------------
     # Entity helpers

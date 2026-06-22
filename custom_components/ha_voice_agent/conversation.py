@@ -220,6 +220,7 @@ class HAVoiceAgentEntity(ConversationEntity, conversation.AbstractConversationAg
             return "I'm sorry, I ran into a problem completing that request."
 
         data = await ollama_chat(
+            hass=self.hass,
             ollama_url=opts.get(CONF_OLLAMA_URL, DEFAULT_OLLAMA_URL),
             model=opts.get(CONF_MODEL, DEFAULT_MODEL),
             messages=messages,

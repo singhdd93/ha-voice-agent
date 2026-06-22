@@ -43,7 +43,7 @@ class HAVoiceAgentConfigFlow(ConfigFlow, domain=DOMAIN):
 
         if user_input is not None:
             ok = await test_connection(
-                user_input[CONF_OLLAMA_URL], user_input[CONF_MODEL]
+                self.hass, user_input[CONF_OLLAMA_URL], user_input[CONF_MODEL]
             )
             if not ok:
                 errors["base"] = "cannot_connect"

@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any
 
-import httpx
+import aiohttp
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -16,11 +17,12 @@ class OllamaError(Exception):
 
 
 async def chat(
+    hass: HomeAssistant,
     ollama_url: str,
     model: str,
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]] | None = None,
-    num_ctx: int = 4096,
+    num_ctx: int = 2048,
     temperature: float = 0.1,
     num_predict: int = 512,
     timeout: float = 30.0,
@@ -66,20 +68,21 @@ async def chat(
     url = f"{ollama_url.rstrip('/')}/api/chat"
     _LOGGER.debug("Ollama request → %s  model=%s  msgs=%d", url, model, len(messages))
 
+    session = async_get_clientsession(hass)
+    client_timeout = aiohttp.ClientTimeout(total=timeout)
     try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(url, json=payload, timeout=timeout)
-        resp.raise_for_status()
-    except httpx.TimeoutException as err:
-        raise OllamaError(f"Ollama request timed out after {timeout}s") from err
-    except httpx.HTTPStatusError as err:
+        async with session.post(url, json=payload, timeout=client_timeout) as resp:
+            resp.raise_for_status()
+            data = await resp.json()
+    except aiohttp.ClientResponseError as err:
         raise OllamaError(
-            f"Ollama returned HTTP {err.response.status_code}: {err.response.text[:200]}"
+            f"Ollama returned HTTP {err.status}: {err.message}"
         ) from err
-    except httpx.RequestError as err:
+    except aiohttp.ServerTimeoutError as err:
+        raise OllamaError(f"Ollama request timed out after {timeout}s") from err
+    except aiohttp.ClientError as err:
         raise OllamaError(f"Could not reach Ollama at {url}: {err}") from err
 
-    data = resp.json()
     _LOGGER.debug(
         "Ollama response: done_reason=%s prompt_tokens=%s gen_tokens=%s",
         data.get("done_reason"),
@@ -89,15 +92,16 @@ async def chat(
     return data
 
 
-async def test_connection(ollama_url: str, model: str) -> bool:
+async def test_connection(hass: HomeAssistant, ollama_url: str, model: str) -> bool:
     """Return True if Ollama is reachable and the model exists."""
     try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(
-                f"{ollama_url.rstrip('/')}/api/tags", timeout=5.0
-            )
-        resp.raise_for_status()
-        tags = resp.json()
+        session = async_get_clientsession(hass)
+        async with session.get(
+            f"{ollama_url.rstrip('/')}/api/tags",
+            timeout=aiohttp.ClientTimeout(total=5.0),
+        ) as resp:
+            resp.raise_for_status()
+            tags = await resp.json()
         model_names = [m["name"] for m in tags.get("models", [])]
         return any(m == model or m.startswith(model.split(":")[0]) for m in model_names)
     except Exception:  # noqa: BLE001

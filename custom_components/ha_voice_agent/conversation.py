@@ -244,6 +244,8 @@ class HAVoiceAgentEntity(ConversationEntity, conversation.AbstractConversationAg
             log_level=opts.get(CONF_LLM_LOG_LEVEL, DEFAULT_LLM_LOG_LEVEL),
         )
 
+        import json as _json
+
         msg = data.get("message", {})
         content: str = msg.get("content") or ""
         tool_calls: list[dict] = msg.get("tool_calls") or []
@@ -254,6 +256,30 @@ class HAVoiceAgentEntity(ConversationEntity, conversation.AbstractConversationAg
                 "Response truncated at %d tokens — increase max_tokens if this is frequent",
                 data.get("eval_count", 0),
             )
+
+        # llama3.2:3b sometimes serializes the entire tool call as JSON text in `content`
+        # instead of using the `tool_calls` field.  Detect and normalise it here so the
+        # rest of the handler sees a proper tool_calls list regardless.
+        if not tool_calls and content.lstrip().startswith("{") and '"execute_services"' in content:
+            try:
+                parsed = _json.loads(content.strip())
+                fn_name = (
+                    parsed.get("name")
+                    or (parsed.get("function") or {}).get("name", "")
+                )
+                fn_args = (
+                    parsed.get("parameters")
+                    or parsed.get("arguments")
+                    or (parsed.get("function") or {}).get("arguments", {})
+                )
+                if fn_name and isinstance(fn_args, dict):
+                    tool_calls = [{"function": {"name": fn_name, "arguments": fn_args}}]
+                    content = ""
+                    _LOGGER.info(
+                        "Extracted tool call from JSON content: %s args=%s", fn_name, fn_args
+                    )
+            except Exception:
+                pass  # not valid JSON — fall through and return as text
 
         if not tool_calls:
             return content.strip() or "Sorry, I didn't get a complete response. Please try again."
@@ -276,6 +302,15 @@ class HAVoiceAgentEntity(ConversationEntity, conversation.AbstractConversationAg
                 messages.append(msg)
                 for _ in tool_calls:
                     messages.append({"role": "tool", "content": state_text})
+                final = await self._query(user_input, messages, depth + 1, force_no_tools=True)
+                # llama3.2:3b sometimes outputs raw JSON tool-call text in `content` when
+                # tools=None.  Detect this and fall back to our own state synthesis.
+                if final.lstrip().startswith("{") or '"execute_services"' in final:
+                    _LOGGER.info(
+                        "force_no_tools returned JSON content — synthesizing from direct lookup"
+                    )
+                    return self._synthesize_from_state(state_text)
+                return final
             return await self._query(user_input, messages, depth + 1, force_no_tools=True)
 
         messages.append(msg)
@@ -468,6 +503,61 @@ class HAVoiceAgentEntity(ConversationEntity, conversation.AbstractConversationAg
             return None
 
         return "; ".join(results)
+
+    def _synthesize_from_state(self, state_text: str) -> str:
+        """Build a natural language sentence from a direct-lookup state string.
+
+        state_text format (from _try_direct_state_lookup):
+          "entity_id (Display Name) is STATE | {'attr': val, ...}[; ...]"
+        """
+        import ast as _ast
+
+        sentences: list[str] = []
+        for part in state_text.split(";"):
+            part = part.strip()
+            if " is " not in part:
+                continue
+            # Extract display name from parentheses: "... (Blue Room Fan) is ..."
+            p_open = part.find("(")
+            p_close = part.find(")")
+            if 0 <= p_open < p_close:
+                display = part[p_open + 1 : p_close]
+            else:
+                display = part.split(" is ")[0].strip()
+
+            after_is = part.split(" is ", 1)[1]
+            if " | " in after_is:
+                state_val, attrs_raw = after_is.split(" | ", 1)
+                try:
+                    attrs: dict = _ast.literal_eval(attrs_raw)
+                except Exception:
+                    attrs = {}
+            else:
+                state_val = after_is
+                attrs = {}
+
+            state_val = state_val.strip()
+            attr_parts: list[str] = []
+            if "percentage" in attrs:
+                attr_parts.append(f"speed {attrs['percentage']}%")
+            if "current_temperature" in attrs:
+                attr_parts.append(f"current temperature {attrs['current_temperature']}°")
+            if "temperature" in attrs and "current_temperature" in attrs:
+                attr_parts.append(f"set to {attrs['temperature']}°")
+            elif "temperature" in attrs:
+                attr_parts.append(f"temperature set to {attrs['temperature']}°")
+            if "fan_mode" in attrs:
+                attr_parts.append(f"fan mode {attrs['fan_mode']}")
+            if "preset_mode" in attrs:
+                attr_parts.append(f"preset {attrs['preset_mode']}")
+            if "brightness" in attrs:
+                pct = round(attrs["brightness"] / 255 * 100)
+                attr_parts.append(f"brightness {pct}%")
+
+            suffix = (", " + ", ".join(attr_parts)) if attr_parts else ""
+            sentences.append(f"The {display} is {state_val}{suffix}.")
+
+        return " ".join(sentences) if sentences else state_text
 
     def _lookup_entity_state(self, domain: str, raw_entity_id: str | list) -> str:
         """Resolve a (possibly malformed) entity reference and return its state as text."""

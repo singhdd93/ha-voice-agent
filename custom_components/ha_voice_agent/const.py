@@ -75,7 +75,7 @@ DOMAIN_ATTRIBUTES: dict[str, list[str]] = {
     "cover": ["current_position"],
     "remote": [],
     "switch": [],
-    "sensor": [],
+    "sensor": ["unit_of_measurement"],
     "binary_sensor": [],
 }
 

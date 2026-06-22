@@ -272,7 +272,13 @@ class HAVoiceAgentEntity(ConversationEntity, conversation.AbstractConversationAg
         return await self._query(user_input, messages, depth + 1)
 
     async def _execute_services(self, arguments: dict) -> str:
+        import json as _json
         service_list = arguments.get("list", [])
+        if isinstance(service_list, str):
+            try:
+                service_list = _json.loads(service_list)
+            except Exception:
+                service_list = []
         if not service_list:
             return "No services to execute."
 

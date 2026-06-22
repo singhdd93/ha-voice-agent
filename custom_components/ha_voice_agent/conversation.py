@@ -152,6 +152,22 @@ class HAVoiceAgentEntity(ConversationEntity, conversation.AbstractConversationAg
             top_ids = await self._embed_index.async_search(user_input.text)
             area_ids = self._get_area_entity_ids(user_input.device_id)
             selected_ids = set(top_ids) | area_ids
+
+            # For domain-wide aggregation queries ("what lights are on", "how are all fans"),
+            # inject ALL entities of the relevant domain so the model can filter by state.
+            agg_domain = self._detect_aggregation_domain(user_input.text)
+            if agg_domain:
+                all_domain_ids = {
+                    eid for eid in (self._embed_index._entity_ids or [])
+                    if eid.split(".")[0] == agg_domain
+                }
+                selected_ids |= all_domain_ids
+                _LOGGER.info(
+                    "Aggregation query detected for domain '%s' — added %d domain entities",
+                    agg_domain, len(all_domain_ids),
+                )
+
+            selected_ids = self._drop_shadowed_sensors(selected_ids)
             exposed_entities = self._get_entities_by_ids(selected_ids)
             _LOGGER.info(
                 "Vector search: %d top + %d area = %d total entities (from %d)",
@@ -204,6 +220,16 @@ class HAVoiceAgentEntity(ConversationEntity, conversation.AbstractConversationAg
             intent_response.async_set_error(
                 intent.IntentResponseErrorCode.UNKNOWN,
                 f"Something went wrong: {err}",
+            )
+            return ConversationResult(
+                response=intent_response, conversation_id=conversation_id
+            )
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.exception("Unhandled error in HA Voice Agent: %s", err)
+            intent_response = intent.IntentResponse(language=user_input.language)
+            intent_response.async_set_error(
+                intent.IntentResponseErrorCode.UNKNOWN,
+                f"Sorry, something went wrong: {err}",
             )
             return ConversationResult(
                 response=intent_response, conversation_id=conversation_id
@@ -287,8 +313,24 @@ class HAVoiceAgentEntity(ConversationEntity, conversation.AbstractConversationAg
         # If every tool call is a state query (no control actions), the model is trying
         # to use tools to look up state it already has in its context. Resolve the state
         # programmatically and inject it, then do a final no-tools call.
+        #
+        # Also treat turn_on/turn_off as a query when the user text is clearly asking
+        # about state ("is X on?", "is X off?") — prevents accidental device control.
+        _user_norm = user_input.text.lower().strip()
+        _is_state_question = (
+            _user_norm.startswith("is ")
+            or _user_norm.startswith("are ")
+            or _user_norm.startswith("what ")
+            or _user_norm.startswith("which ")
+            or _user_norm.startswith("how ")
+            or "status" in _user_norm
+            or "state" in _user_norm
+        )
+        _CONTROL_AS_QUERY = frozenset({"turn_on", "turn_off"}) if _is_state_question else frozenset()
+
         all_query = all(
-            tc.get("function", {}).get("arguments", {}).get("service", "") in self._QUERY_SERVICE_NAMES
+            tc.get("function", {}).get("arguments", {}).get("service", "")
+            in (self._QUERY_SERVICE_NAMES | _CONTROL_AS_QUERY)
             for tc in tool_calls
         )
         if all_query and not force_no_tools:
@@ -387,6 +429,25 @@ class HAVoiceAgentEntity(ConversationEntity, conversation.AbstractConversationAg
                 continue
 
             entity_id = service_data.pop("entity_id", None)
+            # Auto-prepend domain prefix when model omits it (e.g. "blue_room_tv" → "remote.blue_room_tv")
+            if entity_id and isinstance(entity_id, str) and "." not in entity_id:
+                entity_id = f"{domain}.{entity_id}"
+                _LOGGER.info("Auto-prefixed entity_id → %s", entity_id)
+
+            # Reject domain mismatch: e.g. fan.set_percentage on sensor.blue_room_fan_speed
+            if entity_id and isinstance(entity_id, str) and "." in entity_id:
+                entity_domain = entity_id.split(".")[0]
+                if entity_domain != domain:
+                    _LOGGER.warning(
+                        "Domain mismatch — rejecting %s.%s on entity %s (entity domain is '%s')",
+                        domain, service, entity_id, entity_domain,
+                    )
+                    results.append(
+                        f"Error: entity '{entity_id}' belongs to domain '{entity_domain}', "
+                        f"not '{domain}'. Use a {domain}.* entity instead."
+                    )
+                    continue
+
             target: dict[str, Any] = {}
             if entity_id:
                 target["entity_id"] = entity_id
@@ -407,6 +468,9 @@ class HAVoiceAgentEntity(ConversationEntity, conversation.AbstractConversationAg
             except HomeAssistantError as err:
                 _LOGGER.error("Service %s.%s failed: %s", domain, service, err)
                 results.append(f"{domain}.{service}: failed — {err}")
+            except Exception as err:  # noqa: BLE001
+                _LOGGER.exception("Unexpected error calling %s.%s: %s", domain, service, err)
+                results.append(f"{domain}.{service}: error — {err}")
 
         return "; ".join(results)
 
@@ -603,6 +667,78 @@ class HAVoiceAgentEntity(ConversationEntity, conversation.AbstractConversationAg
     # Entity helpers
     # ------------------------------------------------------------------
 
+    # Plural/collective keywords that signal a domain-wide aggregation query.
+    _AGGREGATION_KEYWORDS: dict[str, str] = {
+        "lights": "light",
+        "fans": "fan",
+        "acs": "climate",
+        "air conditioners": "climate",
+        "switches": "switch",
+        "blinds": "cover",
+        "curtains": "cover",
+        "tvs": "remote",
+    }
+
+    def _detect_aggregation_domain(self, user_text: str) -> str | None:
+        """Return the HA domain if the query asks about ALL devices of one type.
+
+        Heuristic: plural domain keyword present AND no specific area name matched.
+        E.g. "what lights are on" → 'light', "how are all fans doing" → 'fan'.
+        Returns None for single-device queries like "is blue room fan on".
+        """
+        norm = user_text.lower()
+        area_reg = ar.async_get(self.hass)
+        has_area = any(
+            area.name.lower().replace(" ", "") in norm.replace(" ", "")
+            for area in area_reg.async_list_areas()
+        )
+        if has_area:
+            return None  # specific area → not a global aggregation
+        for keyword, domain in self._AGGREGATION_KEYWORDS.items():
+            if keyword in norm:
+                return domain
+        return None
+
+    # Domains whose sensor duplicates we want to suppress when the real entity is present.
+    _SHADOWING_DOMAINS = frozenset({"fan", "light", "climate", "cover", "switch", "remote"})
+
+    def _drop_shadowed_sensors(self, entity_ids: set[str]) -> set[str]:
+        """Remove sensor.* entities whose controllable counterpart is already in the set.
+
+        Example: if fan.guest_bedroom_fan is in the set, drop
+        sensor.guest_bedroom_fan_speed because the model confuses the percentage
+        reading for a target value and calls fan.set_percentage on the sensor.
+        """
+        controllable = {
+            eid for eid in entity_ids if eid.split(".")[0] in self._SHADOWING_DOMAINS
+        }
+        if not controllable:
+            return entity_ids  # nothing to shadow
+
+        # Build a set of "base names" from controllable entities (strip domain prefix).
+        ctrl_bases = {eid.split(".", 1)[1] for eid in controllable}
+
+        pruned: set[str] = set()
+        for eid in entity_ids:
+            if eid.split(".")[0] != "sensor":
+                pruned.add(eid)
+                continue
+            sensor_name = eid.split(".", 1)[1]  # e.g. "guest_bedroom_fan_speed"
+            # Drop if any controllable base name is a prefix of this sensor name.
+            shadowed = any(sensor_name.startswith(base) for base in ctrl_bases)
+            if shadowed:
+                _LOGGER.debug("Dropping shadowed sensor %s (controllable entity present)", eid)
+            else:
+                pruned.add(eid)
+        return pruned
+
+    @staticmethod
+    def _clean_attr_value(v: Any) -> Any:
+        """Convert HA enum/special types to plain Python primitives for the LLM prompt."""
+        if hasattr(v, "value"):
+            return v.value  # StrEnum / IntEnum (e.g. UnitOfTemperature.CELSIUS → '°C')
+        return v
+
     def _get_all_exposed_entities(self) -> list[dict[str, Any]]:
         """Return all exposed entities with state + domain attributes + area name."""
         entity_reg = er.async_get(self.hass)
@@ -615,7 +751,11 @@ class HAVoiceAgentEntity(ConversationEntity, conversation.AbstractConversationAg
             entity = entity_reg.async_get(state.entity_id)
             domain = state.domain
             attr_keys = DOMAIN_ATTRIBUTES.get(domain, [])
-            attrs = {k: v for k in attr_keys if (v := state.attributes.get(k)) is not None}
+            attrs = {
+                k: self._clean_attr_value(v)
+                for k in attr_keys
+                if (v := state.attributes.get(k)) is not None
+            }
             area_name = self._resolve_area_name(entity, dev_reg, area_reg)
             result.append({
                 "entity_id": state.entity_id,
@@ -642,7 +782,11 @@ class HAVoiceAgentEntity(ConversationEntity, conversation.AbstractConversationAg
             entity = entity_reg.async_get(eid)
             domain = state.domain
             attr_keys = DOMAIN_ATTRIBUTES.get(domain, [])
-            attrs = {k: v for k in attr_keys if (v := state.attributes.get(k)) is not None}
+            attrs = {
+                k: self._clean_attr_value(v)
+                for k in attr_keys
+                if (v := state.attributes.get(k)) is not None
+            }
             area_name = self._resolve_area_name(entity, dev_reg, area_reg)
             result.append({
                 "entity_id": eid,

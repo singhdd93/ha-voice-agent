@@ -1,0 +1,33 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "HA Voice Agent",
+        "description": "Connect to a local Ollama instance.",
+        "data": {
+          "ollama_url": "Ollama URL",
+          "model": "Model name"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Cannot reach Ollama or model not found. Check the URL and model name."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "HA Voice Agent options",
+        "data": {
+          "ollama_url": "Ollama URL",
+          "model": "Model name",
+          "num_ctx": "Context window (tokens)",
+          "max_tokens": "Max response tokens",
+          "temperature": "Temperature",
+          "max_tool_calls": "Max tool call rounds",
+          "system_prompt": "System prompt (Jinja2 template)"
+        }
+      }
+    }
+  }
+}

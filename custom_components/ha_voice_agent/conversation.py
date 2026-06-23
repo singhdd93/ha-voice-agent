@@ -481,10 +481,17 @@ class HAVoiceAgentEntity(ConversationEntity, conversation.AbstractConversationAg
                 continue
 
             entity_id = service_data.pop("entity_id", None)
-            # Auto-prepend domain prefix when model omits it (e.g. "blue_room_tv" → "remote.blue_room_tv")
-            if entity_id and isinstance(entity_id, str) and "." not in entity_id:
-                entity_id = f"{domain}.{entity_id}"
-                _LOGGER.info("Auto-prefixed entity_id → %s", entity_id)
+            # Auto-prepend domain prefix when model omits it (handles both str and list).
+            if entity_id:
+                if isinstance(entity_id, str) and "." not in entity_id:
+                    entity_id = f"{domain}.{entity_id}"
+                    _LOGGER.info("Auto-prefixed entity_id → %s", entity_id)
+                elif isinstance(entity_id, list):
+                    entity_id = [
+                        f"{domain}.{e}" if isinstance(e, str) and "." not in e else e
+                        for e in entity_id
+                    ]
+                    _LOGGER.info("Auto-prefixed entity_id list → %s", entity_id)
 
             # Reject domain mismatch: e.g. fan.set_percentage on sensor.blue_room_fan_speed
             if entity_id and isinstance(entity_id, str) and "." in entity_id:

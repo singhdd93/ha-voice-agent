@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, Literal
 
 from homeassistant.components import conversation
@@ -78,6 +79,10 @@ class HAVoiceAgentEntity(ConversationEntity, conversation.AbstractConversationAg
     _attr_name = None
     _attr_supported_features = ConversationEntityFeature.CONTROL
 
+    # Per-device session history (in-memory, 30 s TTL, last 3 turns)
+    _HIST_MAX_TURNS = 3
+    _HIST_TTL = 30.0
+
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         self.hass = hass
         self.entry = entry
@@ -90,6 +95,8 @@ class HAVoiceAgentEntity(ConversationEntity, conversation.AbstractConversationAg
             entry_type=dr.DeviceEntryType.SERVICE,
         )
         self._embed_index: EntityEmbeddingIndex | None = None
+        # device_id → {"messages": [(role, text), ...], "last_time": float}
+        self._device_history: dict[str, dict] = {}
 
     @property
     def supported_languages(self) -> list[str] | Literal["*"]:
@@ -144,18 +151,46 @@ class HAVoiceAgentEntity(ConversationEntity, conversation.AbstractConversationAg
     ) -> ConversationResult:
         conversation_id = chat_log.conversation_id
 
+        # --- Session history (per-device, 30 s TTL) ---
+        _now = time.monotonic()
+        _dev_key = user_input.device_id or "default"
+        # Prune stale sessions
+        self._device_history = {
+            k: v for k, v in self._device_history.items()
+            if _now - v["last_time"] < self._HIST_TTL
+        }
+        _prior_turns: list[tuple[str, str]] = (
+            self._device_history.get(_dev_key, {}).get("messages", [])
+        )
+
+        # Expand anaphoric queries (it / that / them / this / those) with prior context
+        # so vector search finds the right entities even when the user says "then turn it on".
+        _search_text = user_input.text
+        if _prior_turns:
+            _anaphoric = {"it", "that", "this", "them", "those", "these", "there"}
+            if set(_search_text.lower().split()) & _anaphoric:
+                _prior_user = next(
+                    (m[1] for m in reversed(_prior_turns) if m[0] == "user"), None
+                )
+                if _prior_user:
+                    _search_text = _prior_user + " " + _search_text
+                    _LOGGER.info(
+                        "Expanded anaphoric query for vector search: %r → %r",
+                        user_input.text, _search_text,
+                    )
+
         # --- Entity selection: vector search + area union ---
         opts = self.entry.options
         use_vector = opts.get(CONF_VECTOR_SEARCH, DEFAULT_VECTOR_SEARCH)
 
         if use_vector and self._embed_index and self._embed_index.is_ready:
-            top_ids = await self._embed_index.async_search(user_input.text)
+            top_ids = await self._embed_index.async_search(_search_text)
             area_ids = self._get_area_entity_ids(user_input.device_id)
             selected_ids = set(top_ids) | area_ids
 
             # For domain-wide aggregation queries ("what lights are on", "how are all fans"),
             # inject ALL entities of the relevant domain so the model can filter by state.
-            agg_domain = self._detect_aggregation_domain(user_input.text)
+            agg_domain = self._detect_aggregation_domain(_search_text)
             if agg_domain:
                 all_domain_ids = {
                     eid for eid in (self._embed_index._entity_ids or [])
@@ -188,18 +223,20 @@ class HAVoiceAgentEntity(ConversationEntity, conversation.AbstractConversationAg
         system_prompt = self._render_prompt(exposed_entities, user_input)
         messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
 
-        # chat_log.content already includes the current user turn (added by async_get_chat_log).
-        # Do NOT append user_input.text again — that causes a duplicate that confuses the model.
-        for msg in chat_log.content:
-            if hasattr(msg, "role") and hasattr(msg, "content"):
-                if msg.role in ("user", "assistant") and msg.content:
-                    messages.append({"role": msg.role, "content": msg.content})
+        # Include prior session turns (up to _HIST_MAX_TURNS user+assistant pairs).
+        # This lets the model resolve anaphoric references like "then turn it on".
+        for role, text in _prior_turns[-(self._HIST_MAX_TURNS * 2):]:
+            messages.append({"role": role, "content": text})
+
+        # Add the current user message.
+        messages.append({"role": "user", "content": user_input.text})
 
         _LOGGER.info(
-            "Query: %r  entities_in_prompt=%d  msgs=%d",
+            "Query: %r  entities_in_prompt=%d  msgs=%d  hist_turns=%d",
             user_input.text,
             len(exposed_entities),
             len(messages),
+            len(_prior_turns) // 2,
         )
 
         try:
@@ -234,6 +271,16 @@ class HAVoiceAgentEntity(ConversationEntity, conversation.AbstractConversationAg
             return ConversationResult(
                 response=intent_response, conversation_id=conversation_id
             )
+
+        # Persist this turn to device session history for follow-up context.
+        _hist = self._device_history.setdefault(
+            _dev_key, {"messages": [], "last_time": _now}
+        )
+        _hist["messages"].extend([("user", user_input.text), ("assistant", response_text)])
+        _hist["last_time"] = time.monotonic()
+        _max_msgs = self._HIST_MAX_TURNS * 2
+        if len(_hist["messages"]) > _max_msgs:
+            _hist["messages"] = _hist["messages"][-_max_msgs:]
 
         intent_response = intent.IntentResponse(language=user_input.language)
         intent_response.async_set_speech(response_text)
@@ -416,6 +463,11 @@ class HAVoiceAgentEntity(ConversationEntity, conversation.AbstractConversationAg
                 service_data = dict(raw_data)
             else:
                 service_data = {}
+
+            # Normalise alternative entity key names the model sometimes uses.
+            for _alt in ("entities", "entity"):
+                if _alt in service_data and "entity_id" not in service_data:
+                    service_data["entity_id"] = service_data.pop(_alt)
 
             if not domain or not service:
                 results.append("Skipped: missing domain or service.")
